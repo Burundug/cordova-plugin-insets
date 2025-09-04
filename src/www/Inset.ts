@@ -25,7 +25,7 @@ interface IInsetEvent<T = unknown> {
     data: T;
 }
 
-type IInsetInitEvent = IInsetEvent<string>;
+type IInsetInitEvent = IInsetEvent<IInset>;
 interface IInsetUpdateEvent extends IInsetEvent<IInset> {
     id: string;
 }
@@ -48,8 +48,8 @@ export class Inset {
 
     /**
      * Gets the native identifier
-     * 
-     * @returns 
+     *
+     * @returns
      */
     public getID(): string {
         return this.$id;
@@ -57,7 +57,7 @@ export class Inset {
 
     /**
      * Gets the last emitted inset information
-     * 
+     *
      * @returns
      */
     public getInsets(): IInset {
@@ -71,10 +71,10 @@ export class Inset {
 
     /**
      * See the static Inset.free method for details
-     * 
+     *
      * This is the equivilant of calling Inset.free(insetInstance)
-     * 
-     * @returns 
+     *
+     * @returns
      */
     public async free(): Promise<void> {
         return await Inset.free(this);
@@ -82,14 +82,14 @@ export class Inset {
 
     /**
      * Adds a listener to this inset configuration.
-     * 
+     *
      * Note that this may fire even if nothing has actually
      * changed.
-     * 
+     *
      * Retain the listener reference to remove it later if
      * necessary.
-     * 
-     * @param listener 
+     *
+     * @param listener
      */
     public addListener(listener: IInsetCallbackFunc): void {
         this.$listeners.push(listener);
@@ -98,8 +98,8 @@ export class Inset {
 
     /**
      * Frees the listener reference
-     * 
-     * @param listener 
+     *
+     * @param listener
      */
     public removeListener(listener: IInsetCallbackFunc): void {
         let idx: number = this.$listeners.indexOf(listener);
@@ -128,17 +128,17 @@ export class Inset {
      * Configures a new Inset instance to listen for inset changes
      * It's valid to have multiple instances, with different configurations
      * Each instance may have 0-to-many listeners attached via addListener
-     * 
+     *
      * If this instance is no longer needed/used, call `free` to free
      * resources.
-     * 
+     *
      * It will be more performant to keep the instance count low. If only one
      * configuration set is needed, then it would be recommended to create a
      * single instance and share it rather than every object having it's own
      * inset listener instance.
-     * 
-     * @param config 
-     * @returns 
+     *
+     * @param config
+     * @returns
      */
     public static create(config: IInsetConfiguration): Promise<Inset> {
         return new Promise<Inset>((resolve, reject) => {
@@ -158,7 +158,8 @@ export class Inset {
             cordova.exec(
                 (e: IInsetEvent) => {
                     if (Inset.$isInitEvent(e)) {
-                        inset.$id = e.data;
+                        inset.$id = e.id;
+                        inset.$currentInset = e.data;
                         resolve(inset);
                     }
                     else if (Inset.$isUpdateEvent(e)) {
@@ -176,16 +177,16 @@ export class Inset {
     /**
      * Frees the native resources associated with the given
      * inset.
-     * 
+     *
      * After freeing, the inset is no longer usable and it will
      * not receive anymore inset updates. If you retain any
      * references to inset listeners, they should also be dereferenced
      * to allow for garbage collection.
-     * 
+     *
      * This is the equivilant of calling `await inset.free()`
-     * 
-     * @param inset 
-     * @returns 
+     *
+     * @param inset
+     * @returns
      */
     public static free(inset: Inset | string): Promise<void> {
         let id: string = null;
@@ -213,6 +214,12 @@ export class Inset {
                 [id]
             );
         });
+    }
+
+    public on(event: 'update', listener: IInsetCallbackFunc): () => void {
+        if (event !== 'update') return () => {};
+        this.addListener(listener);
+        return () => this.removeListener(listener);
     }
 
     private static $isInitEvent(e: IInsetEvent): e is IInsetInitEvent {
