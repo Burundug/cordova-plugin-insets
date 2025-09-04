@@ -16,15 +16,25 @@
 
 package com.totalpave.cordova.inset;
 
+import android.app.Activity;
 import android.content.res.Configuration;
 import android.content.Context;
+import android.graphics.Color;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.RoundedCorner;
+import android.view.View;
+import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
+
+import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
+import org.apache.cordova.LOG;
 import org.apache.cordova.PluginResult.Status;
 import org.apache.cordova.PluginResult;
 import org.json.JSONArray;
@@ -38,7 +48,8 @@ import java.util.UUID;
 public class Inset extends CordovaPlugin {
     public static final int DEFAULT_INSET_MASK = WindowInsetsCompat.Type.displayCutout() | WindowInsetsCompat.Type.systemBars();
     public static final boolean DEFAULT_INCLUDE_ROUNDED_CORNERS = true;
-
+    private final Object $insetCacheLock = new Object();
+    private JSONObject $lastInsetJson; // кеш последнего рассчитанного инсета
     public static class WebviewMask {
         private WebviewMask() {}
 
@@ -55,12 +66,9 @@ public class Inset extends CordovaPlugin {
 
     public static class ListenerConfiguration {
         public Integer mask;
-        public boolean includeRoundedCorners;
-
-        public ListenerConfiguration() {
-            mask = null;
-            includeRoundedCorners = DEFAULT_INCLUDE_ROUNDED_CORNERS;
-        }
+        public boolean includeRoundedCorners = DEFAULT_INCLUDE_ROUNDED_CORNERS;
+        public boolean stable = false;        // NEW
+        public boolean includeIme = false;    // NEW
     }
 
     public static class Listener {
@@ -68,6 +76,8 @@ public class Inset extends CordovaPlugin {
         private final CallbackContext $callback;
         private JSONObject $currentInset;
         private final int $mask;
+        private final boolean $stable;
+        private final boolean $includeIme;
         private final boolean $includeRoundedCorners;
         private final UUID $id;
 
@@ -75,6 +85,8 @@ public class Inset extends CordovaPlugin {
             $id = UUID.randomUUID();
             $context = context;
             $callback = callback;
+            $stable = config.stable;
+            $includeIme = config.includeIme;
             if (config.mask == null) {
                 $mask = DEFAULT_INSET_MASK;
             }
@@ -89,116 +101,72 @@ public class Inset extends CordovaPlugin {
         }
 
         public void onInsetUpdate(WindowInsetsCompat insetProvider) {
-            JSONObject result = new JSONObject();
-
             try {
                 float density = $context.getResources().getDisplayMetrics().density;
 
-                // Ideally, we'd import this, but it shares the same name as our plugin
-                androidx.core.graphics.Insets insets = insetProvider.getInsets($mask);
+                Insets sys = $stable
+                        ? insetProvider.getInsetsIgnoringVisibility($mask)
+                        : insetProvider.getInsets($mask);
 
-                double topLeftRadius = 0.0;
-                double topRightRadius = 0.0;
-                double botLeftRadius = 0.0;
-                double botRightRadius = 0.0;
+                double top=0, right=0, bottom=0, left=0;
+                top = sys.top / density;
+                right = sys.right / density;
+                bottom = sys.bottom / density;
+                left = sys.left / density;
 
+                double tl=0,tr=0,bl=0,br=0;
                 if ($includeRoundedCorners && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    WindowInsets sourceInsets = insetProvider.toWindowInsets();
-                    if (sourceInsets != null) {
-                        RoundedCorner topLeft = sourceInsets.getRoundedCorner(RoundedCorner.POSITION_TOP_LEFT);
-                        RoundedCorner topRight = sourceInsets.getRoundedCorner(RoundedCorner.POSITION_TOP_RIGHT);
-                        RoundedCorner botLeft = sourceInsets.getRoundedCorner(RoundedCorner.POSITION_BOTTOM_LEFT);
-                        RoundedCorner botRight = sourceInsets.getRoundedCorner(RoundedCorner.POSITION_BOTTOM_RIGHT);
-
-                        if (topLeft != null) {
-                            int radius = topLeft.getRadius();
-                            topLeftRadius = (double) radius / density;
-                        }
-
-                        if (topRight != null) {
-                            int radius = topRight.getRadius();
-                            topRightRadius = (double) radius / density;
-                        }
-
-                        if (botLeft != null) {
-                            int radius = botLeft.getRadius();
-                            botLeftRadius = (double) radius / density;
-                        }
-
-                        if (botRight != null) {
-                            int radius = botRight.getRadius();
-                            botRightRadius = (double) radius / density;
-                        }
+                    WindowInsets wi = insetProvider.toWindowInsets();
+                    if (wi != null) {
+                        RoundedCorner c;
+                        if ((c = wi.getRoundedCorner(RoundedCorner.POSITION_TOP_LEFT)) != null)  tl = c.getRadius()/density;
+                        if ((c = wi.getRoundedCorner(RoundedCorner.POSITION_TOP_RIGHT)) != null) tr = c.getRadius()/density;
+                        if ((c = wi.getRoundedCorner(RoundedCorner.POSITION_BOTTOM_LEFT)) != null) bl = c.getRadius()/density;
+                        if ((c = wi.getRoundedCorner(RoundedCorner.POSITION_BOTTOM_RIGHT)) != null) br = c.getRadius()/density;
                     }
                 }
+                top    = Math.max(top,    Math.max(tl, tr));
 
-                double top = insets.top / density;
-                double right = insets.right / density;
-                double bottom = insets.bottom / density;
-                double left = insets.left / density;
+                int navBottom   = insetProvider.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
+                int gestBottom  = insetProvider.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom;
+                int tapBottom   = insetProvider.getInsets(WindowInsetsCompat.Type.tappableElement()).bottom;
+                int cutBottom   = insetProvider.getInsets(WindowInsetsCompat.Type.displayCutout()).bottom;
 
-                // First we will get the screen orientation. This may be locked by the user, so it
-                // may not match the physical orientation. If the orientation cannot be determined,
-                // we will assume PORTRAIT
-                int orientation = Configuration.ORIENTATION_UNDEFINED;
+                int gestureZone = Math.max(gestBottom, tapBottom);
+                int smartBottomPx = (gestureZone > 0 ? gestureZone : navBottom);
 
-                // There are other orientation types, albeit deprecated and supposedly no longer
-                // used, but this limits us from handling only portrait and landscape.
-                switch ($context.getResources().getConfiguration().orientation) {
-                    case Configuration.ORIENTATION_LANDSCAPE:
-                    case Configuration.ORIENTATION_PORTRAIT:
-                        orientation = $context.getResources().getConfiguration().orientation;
-                        break;
-                    case Configuration.ORIENTATION_SQUARE:
-                    case Configuration.ORIENTATION_UNDEFINED:
-                        // SQUARE is not used anymore since API 16, but included just to satisfy
-                        // lint warnings. If undefined, then fallback to PORTRAIT
-                        orientation = Configuration.ORIENTATION_PORTRAIT;
-                        break;
+                smartBottomPx = Math.max(smartBottomPx, cutBottom);
+
+
+                bottom = smartBottomPx / density;
+                left   = Math.max(left,   Math.max(tl, bl));
+                right  = Math.max(right,  Math.max(tr, br));
+
+                if ($includeIme && insetProvider.isVisible(WindowInsetsCompat.Type.ime())) {
+                    Insets ime = insetProvider.getInsets(WindowInsetsCompat.Type.ime());
+                    bottom = Math.max(bottom, ime.bottom / density);
                 }
 
-                // Insets do not include rounded corner radius. If an inset is present, it
-                // generally will be big enough to cover the rounded corner. This is a coincidence,
-                // not a designed thing. In either case, we need to determine how much space is
-                // required to cover the rounded corner and take the higher between the inset and
-                // the rounded corner.
+                JSONObject data = new JSONObject();
+                data.put("top", top);
+                data.put("right", right);
+                data.put("bottom", bottom);
+                data.put("left", left);
+                data.put("unit", "dp"); // явность
 
-                // If portrait, then top-left & top-right is applied to the top inset,
-                // and bot-left & bot-right is applied to the bottom inset
-                if (orientation == Configuration.ORIENTATION_PORTRAIT) {
-                    top = Math.max(Math.max(top, topLeftRadius), topRightRadius);
-                    bottom = Math.max(Math.max(bottom, botLeftRadius), botRightRadius);
-                }
-                else {
-                    left = Math.max(Math.max(left, topLeftRadius), botLeftRadius);
-                    right = Math.max(Math.max(right, topRightRadius), botRightRadius);
-                }
+                $currentInset = data;
 
-                result.put("top", top);
-                result.put("right", right);
-                result.put("bottom", bottom);
-                result.put("left", left);
-            }
-            catch (JSONException e) {
-                e.printStackTrace();
-                return;
-            }
-
-            this.$currentInset = result;
-
-            JSONObject update = new JSONObject();
-            try {
+                JSONObject update = new JSONObject();
                 update.put("type", "update");
-                update.put("id", this.getID());
-                update.put("data", this.$currentInset);
-            }
-            catch (JSONException ex) {
-                throw new RuntimeException(ex);
-            }
+                update.put("id", getID());
+                update.put("data", $currentInset);
 
-            PluginResult response = new PluginResult(Status.OK, update);
-            response.setKeepCallback(true);
-            $callback.sendPluginResult(response);
+                PluginResult response = new PluginResult(Status.OK, update);
+                response.setKeepCallback(true);
+                $callback.sendPluginResult(response);
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
         }
 
         private int $mapMask(int webviewMask) {
@@ -247,65 +215,209 @@ public class Inset extends CordovaPlugin {
     private ArrayList<Listener> $listeners;
     private HashMap<String, Listener> $listenerMap;
     private final Object $listenerLock = new Object();
+    private JSONObject buildInsetJson(WindowInsetsCompat insets) {
+        try {
+            float density = cordova.getActivity().getResources().getDisplayMetrics().density;
+
+            // базовые системные бары + вырез
+            Insets sys = insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+            );
+
+            int navBottom  = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
+            int gestBottom = Math.max(
+                    insets.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom,
+                    insets.getInsets(WindowInsetsCompat.Type.tappableElement()).bottom
+            );
+            int cutBottom  = insets.getInsets(WindowInsetsCompat.Type.displayCutout()).bottom;
+            int smartBottomPx = Math.max((gestBottom > 0 ? gestBottom : navBottom), cutBottom);
+
+            JSONObject j = new JSONObject();
+            j.put("top",    sys.top    / density);
+            j.put("right",  sys.right  / density);
+            j.put("bottom", smartBottomPx / density);
+            j.put("left",   sys.left   / density);
+            return j;
+        } catch (JSONException e) {
+            return null;
+        }
+    }
 
     @Override
     protected void pluginInitialize() {
-        $listeners = new ArrayList<>();
-        $listenerMap = new HashMap<>();
-        
-        ViewCompat.setOnApplyWindowInsetsListener(
-                this.cordova.getActivity().findViewById(android.R.id.content), (v, insetProvider) -> {
+        if ($listeners == null) $listeners = new ArrayList<>();
+        if ($listenerMap == null) $listenerMap = new HashMap<>();
+        final Activity act = cordova.getActivity();
+        act.runOnUiThread(() -> {
+            // Enable edge-to-edge mode
+            WindowCompat.setDecorFitsSystemWindows(act.getWindow(), false);
+            final View root = act.findViewById(android.R.id.content);
 
-                    synchronized($listenerLock) {
+            // Set inset listener
+            ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
+                synchronized ($insetCacheLock) {
+                    $lastInsetJson = buildInsetJson(insets);
+                    final int typesBase = WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout();
+
+                    Insets base = insets.getInsets(typesBase);
+                    // «Умный» низ: жестовая зона (systemGestures/tappableElement) или навбар
+                    int navBottom  = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
+                    int gestBottom = Math.max(
+                            insets.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom,
+                            insets.getInsets(WindowInsetsCompat.Type.tappableElement()).bottom
+                    );
+                    int cutBottom  = insets.getInsets(WindowInsetsCompat.Type.displayCutout()).bottom;
+
+                    int smartBottom = Math.max( (gestBottom > 0 ? gestBottom : navBottom), cutBottom );
+
+                    // Применяем паддинги к корневому вью до первого кадра
+                    v.setPadding(0, 0, 0, smartBottom);
+                    v.setBackgroundColor(Color.WHITE);
+                    // Notify all listeners
+                    synchronized ($listenerLock) {
                         for (Listener listener : $listeners) {
-                            listener.onInsetUpdate(insetProvider);
+                            listener.onInsetUpdate(insets);
                         }
                     }
-
-                    return WindowInsetsCompat.CONSUMED;
                 }
-        );
+                return insets;
+            });
+
+            // Poll for insets until available
+            Handler handler = new Handler(Looper.getMainLooper());
+            Runnable requestInsets = new Runnable() {
+                @Override
+                public void run() {
+                    WindowInsetsCompat insets = ViewCompat.getRootWindowInsets(root);
+                    if (insets != null) {
+                        final int typesBase = WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout();
+
+                        Insets base = insets.getInsets(typesBase);
+                        // «Умный» низ: жестовая зона (systemGestures/tappableElement) или навбар
+                        int navBottom  = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
+                        int gestBottom = Math.max(
+                                insets.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom,
+                                insets.getInsets(WindowInsetsCompat.Type.tappableElement()).bottom
+                        );
+                        int cutBottom  = insets.getInsets(WindowInsetsCompat.Type.displayCutout()).bottom;
+
+                        int smartBottom = Math.max( (gestBottom > 0 ? gestBottom : navBottom), cutBottom );
+
+                        // Применяем паддинги к корневому вью до первого кадра
+                        root.setPadding(base.left, base.top, base.right, smartBottom);
+                        root.setBackgroundColor(Color.WHITE);
+                        // Notify all listeners
+                        synchronized ($insetCacheLock) {
+                            $lastInsetJson = buildInsetJson(insets);
+                            // Notify listeners immediately
+                            synchronized ($listenerLock) {
+                                for (Listener listener : $listeners) {
+                                    listener.onInsetUpdate(insets);
+                                }
+                            }
+                        }
+                    } else {
+                        // Retry after 50ms if insets are not available
+                        ViewCompat.requestApplyInsets(root);
+                        handler.postDelayed(this, 50);
+                    }
+                }
+            };
+            // Trigger initial inset request
+            LOG.d("PLUGIN_INIT","INIT");
+            handler.post(requestInsets);
+        });
     }
+
 
     private void $createNewListener(CallbackContext callback, JSONArray args) {
         ListenerConfiguration config = new ListenerConfiguration();
 
+        // Parse parameters safely
         try {
-            JSONObject params = args.getJSONObject(0);
-            if (params.has("mask")) {
-                config.mask = params.getInt("mask");
+            if (args != null && args.length() > 0 && !args.isNull(0)) {
+                JSONObject params = args.optJSONObject(0);
+                if (params != null) {
+                    if (params.has("mask")) config.mask = params.getInt("mask");
+                    if (params.has("includeRoundedCorners")) config.includeRoundedCorners = params.getBoolean("includeRoundedCorners");
+                    if (params.has("stable")) config.stable = params.getBoolean("stable");
+                    if (params.has("includeIme")) config.includeIme = params.getBoolean("includeIme");
+                }
             }
-            if (params.has("includeRoundedCorners")) {
-                config.includeRoundedCorners = params.getBoolean("includeRoundedCorners");
-            }
+        } catch (JSONException ignored) {
+            // Use default config if parsing fails
         }
-        catch (JSONException ex) {
-            ex.printStackTrace();
-            callback.error(ex.getMessage());
-            return;
-        }
+
         Listener listener = new Listener(cordova.getActivity(), callback, config);
         synchronized ($listenerLock) {
             $listeners.add(listener);
             $listenerMap.put(listener.getID(), listener);
         }
 
-        cordova.getActivity().runOnUiThread(() -> {
-            ViewCompat.requestApplyInsets(cordova.getActivity().findViewById(android.R.id.content));
-        });
-
-        JSONObject responseData = new JSONObject();
+        // Send init response
         try {
+            JSONObject responseData = new JSONObject();
             responseData.put("type", "init");
-            responseData.put("data", listener.getID());
-        }
-        catch(JSONException e) {
-            throw new RuntimeException("Could not build listener creation response", e);
+            responseData.put("id", listener.getID());
+            responseData.put("data", $lastInsetJson);
+            PluginResult initRes = new PluginResult(Status.OK, responseData);
+            initRes.setKeepCallback(true);
+            callback.sendPluginResult(initRes);
+        } catch (JSONException e) {
+            callback.error(e.getMessage());
+            return;
         }
 
-        PluginResult result = new PluginResult(Status.OK, responseData);
-        result.setKeepCallback(true);
-        callback.sendPluginResult(result);
+        // Send immediate update if cached data exists, otherwise retry
+            JSONObject cached;
+            synchronized ($insetCacheLock) {
+                cached = $lastInsetJson;
+            }
+
+            if (cached != null) {
+                try {
+                    JSONObject update = new JSONObject();
+                    update.put("type", "update");
+                    update.put("id", listener.getID());
+                    update.put("data", cached);
+                    PluginResult upd = new PluginResult(Status.OK, update);
+                    upd.setKeepCallback(true);
+                    callback.sendPluginResult(upd);
+                } catch (JSONException ignored) {}
+            } else {
+                cordova.getActivity().runOnUiThread(() -> {
+                    // Retry mechanism: Poll for insets
+                    View root = cordova.getActivity().findViewById(android.R.id.content);
+                    Handler handler = new Handler(Looper.getMainLooper());
+                    Runnable checkInsets = new Runnable() {
+                        @Override
+                        public void run() {
+                            WindowInsetsCompat now = ViewCompat.getRootWindowInsets(root);
+                            if (now != null) {
+                                listener.onInsetUpdate(now);
+                            } else {
+                                // Retry after a short delay (up to 500ms)
+                                handler.postDelayed(this, 50);
+                            }
+                        }
+                    };
+                    handler.post(checkInsets);
+                });
+            }
+    }
+
+    @Override
+    public void initialize(org.apache.cordova.CordovaInterface cordova,
+                           org.apache.cordova.CordovaWebView webView) {
+        super.initialize(cordova, webView);
+        WindowCompat.setDecorFitsSystemWindows(cordova.getActivity().getWindow(), false);
+    }
+    @Override public void onDestroy() {
+        synchronized ($listenerLock) {
+            $listeners.clear();
+            $listenerMap.clear();
+        }
+        super.onDestroy();
     }
 
     private void $freeListener(CallbackContext callback, JSONArray args) throws JSONException {
