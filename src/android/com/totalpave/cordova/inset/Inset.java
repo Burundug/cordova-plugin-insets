@@ -49,7 +49,8 @@ public class Inset extends CordovaPlugin {
     public static final int DEFAULT_INSET_MASK = WindowInsetsCompat.Type.displayCutout() | WindowInsetsCompat.Type.systemBars();
     public static final boolean DEFAULT_INCLUDE_ROUNDED_CORNERS = true;
     private final Object $insetCacheLock = new Object();
-    private JSONObject $lastInsetJson; // кеш последнего рассчитанного инсета
+    private  boolean $isGestureOnly = false;
+    private JSONObject $lastInsetJson;
     public static class WebviewMask {
         private WebviewMask() {}
 
@@ -67,8 +68,8 @@ public class Inset extends CordovaPlugin {
     public static class ListenerConfiguration {
         public Integer mask;
         public boolean includeRoundedCorners = DEFAULT_INCLUDE_ROUNDED_CORNERS;
-        public boolean stable = false;        // NEW
-        public boolean includeIme = false;    // NEW
+        public boolean stable = false;      
+        public boolean includeIme = false;   
     }
 
     public static class Listener {
@@ -76,6 +77,7 @@ public class Inset extends CordovaPlugin {
         private final CallbackContext $callback;
         private JSONObject $currentInset;
         private final int $mask;
+
         private final boolean $stable;
         private final boolean $includeIme;
         private final boolean $includeRoundedCorners;
@@ -152,7 +154,7 @@ public class Inset extends CordovaPlugin {
                 data.put("right", right);
                 data.put("bottom", bottom);
                 data.put("left", left);
-                data.put("unit", "dp"); // явность
+                data.put("unit", "dp");
 
                 $currentInset = data;
 
@@ -219,7 +221,7 @@ public class Inset extends CordovaPlugin {
         try {
             float density = cordova.getActivity().getResources().getDisplayMetrics().density;
 
-            // базовые системные бары + вырез
+ 
             Insets sys = insets.getInsets(
                     WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
             );
@@ -235,7 +237,7 @@ public class Inset extends CordovaPlugin {
             JSONObject j = new JSONObject();
             j.put("top",    sys.top    / density);
             j.put("right",  sys.right  / density);
-            j.put("bottom", smartBottomPx / density);
+            j.put("bottom", !$isGestureOnly ? 0 : smartBottomPx / density);
             j.put("left",   sys.left   / density);
             return j;
         } catch (JSONException e) {
@@ -249,31 +251,24 @@ public class Inset extends CordovaPlugin {
         if ($listenerMap == null) $listenerMap = new HashMap<>();
         final Activity act = cordova.getActivity();
         act.runOnUiThread(() -> {
-            // Enable edge-to-edge mode
+
             WindowCompat.setDecorFitsSystemWindows(act.getWindow(), false);
             final View root = act.findViewById(android.R.id.content);
 
-            // Set inset listener
+
             ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
                 synchronized ($insetCacheLock) {
                     $lastInsetJson = buildInsetJson(insets);
-                    final int typesBase = WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout();
-
-                    Insets base = insets.getInsets(typesBase);
-                    // «Умный» низ: жестовая зона (systemGestures/tappableElement) или навбар
+                    Insets navBars   = insets.getInsets(WindowInsetsCompat.Type.navigationBars());
+                    Insets gestures  = insets.getInsets(WindowInsetsCompat.Type.systemGestures());
                     int navBottom  = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
                     int gestBottom = Math.max(
                             insets.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom,
                             insets.getInsets(WindowInsetsCompat.Type.tappableElement()).bottom
                     );
-                    int cutBottom  = insets.getInsets(WindowInsetsCompat.Type.displayCutout()).bottom;
-
-                    int smartBottom = Math.max( (gestBottom > 0 ? gestBottom : navBottom), cutBottom );
-
-                    // Применяем паддинги к корневому вью до первого кадра
-                    v.setPadding(0, 0, 0, smartBottom);
-                    v.setBackgroundColor(Color.WHITE);
-                    // Notify all listeners
+                    boolean hasNavBarPixels = navBars.bottom > 0;            
+                    $isGestureOnly   = !hasNavBarPixels && gestures.bottom > 0;
+                    
                     synchronized ($listenerLock) {
                         for (Listener listener : $listeners) {
                             listener.onInsetUpdate(insets);
@@ -283,7 +278,7 @@ public class Inset extends CordovaPlugin {
                 return insets;
             });
 
-            // Poll for insets until available
+
             Handler handler = new Handler(Looper.getMainLooper());
             Runnable requestInsets = new Runnable() {
                 @Override
@@ -292,24 +287,16 @@ public class Inset extends CordovaPlugin {
                     if (insets != null) {
                         final int typesBase = WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout();
 
-                        Insets base = insets.getInsets(typesBase);
-                        // «Умный» низ: жестовая зона (systemGestures/tappableElement) или навбар
-                        int navBottom  = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
-                        int gestBottom = Math.max(
-                                insets.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom,
-                                insets.getInsets(WindowInsetsCompat.Type.tappableElement()).bottom
-                        );
-                        int cutBottom  = insets.getInsets(WindowInsetsCompat.Type.displayCutout()).bottom;
-
-                        int smartBottom = Math.max( (gestBottom > 0 ? gestBottom : navBottom), cutBottom );
-
-                        // Применяем паддинги к корневому вью до первого кадра
-                        root.setPadding(base.left, base.top, base.right, smartBottom);
-                        root.setBackgroundColor(Color.WHITE);
-                        // Notify all listeners
+                        
+                        Insets navBars   = insets.getInsets(WindowInsetsCompat.Type.navigationBars());
+                        Insets gestures  = insets.getInsets(WindowInsetsCompat.Type.systemGestures());
+                        boolean hasNavBarPixels = navBars.bottom > 0;          
+                        $isGestureOnly   = !hasNavBarPixels && gestures.bottom > 0;
+                    
+                    
+  
                         synchronized ($insetCacheLock) {
                             $lastInsetJson = buildInsetJson(insets);
-                            // Notify listeners immediately
                             synchronized ($listenerLock) {
                                 for (Listener listener : $listeners) {
                                     listener.onInsetUpdate(insets);
@@ -317,14 +304,12 @@ public class Inset extends CordovaPlugin {
                             }
                         }
                     } else {
-                        // Retry after 50ms if insets are not available
                         ViewCompat.requestApplyInsets(root);
                         handler.postDelayed(this, 50);
                     }
                 }
             };
-            // Trigger initial inset request
-            LOG.d("PLUGIN_INIT","INIT");
+
             handler.post(requestInsets);
         });
     }
@@ -333,7 +318,7 @@ public class Inset extends CordovaPlugin {
     private void $createNewListener(CallbackContext callback, JSONArray args) {
         ListenerConfiguration config = new ListenerConfiguration();
 
-        // Parse parameters safely
+
         try {
             if (args != null && args.length() > 0 && !args.isNull(0)) {
                 JSONObject params = args.optJSONObject(0);
@@ -345,7 +330,7 @@ public class Inset extends CordovaPlugin {
                 }
             }
         } catch (JSONException ignored) {
-            // Use default config if parsing fails
+ 
         }
 
         Listener listener = new Listener(cordova.getActivity(), callback, config);
@@ -354,7 +339,7 @@ public class Inset extends CordovaPlugin {
             $listenerMap.put(listener.getID(), listener);
         }
 
-        // Send init response
+
         try {
             JSONObject responseData = new JSONObject();
             responseData.put("type", "init");
@@ -368,7 +353,6 @@ public class Inset extends CordovaPlugin {
             return;
         }
 
-        // Send immediate update if cached data exists, otherwise retry
             JSONObject cached;
             synchronized ($insetCacheLock) {
                 cached = $lastInsetJson;
@@ -386,7 +370,7 @@ public class Inset extends CordovaPlugin {
                 } catch (JSONException ignored) {}
             } else {
                 cordova.getActivity().runOnUiThread(() -> {
-                    // Retry mechanism: Poll for insets
+
                     View root = cordova.getActivity().findViewById(android.R.id.content);
                     Handler handler = new Handler(Looper.getMainLooper());
                     Runnable checkInsets = new Runnable() {
@@ -396,7 +380,7 @@ public class Inset extends CordovaPlugin {
                             if (now != null) {
                                 listener.onInsetUpdate(now);
                             } else {
-                                // Retry after a short delay (up to 500ms)
+            
                                 handler.postDelayed(this, 50);
                             }
                         }
